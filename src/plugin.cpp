@@ -1,5 +1,7 @@
 namespace
 {
+	std::atomic<int> framesAfterLoad{ 0 };
+
 	bool RegionRejects(RE::TESRegion* a_region, RE::TESWeather* a_weather)
 	{
 		static REL::Relocation<bool (*)(RE::TESRegion*, RE::TESWeather*)> hasWeather{ RELOCATION_ID(16204, 16450) };
@@ -22,37 +24,47 @@ namespace
 		return RegionRejects(a_sky->region, a_sky->currentWeather);
 	}
 
-	bool ScreenIsCovered()
+	struct LoadingScreenWatcher : RE::BSTEventSink<RE::MenuOpenCloseEvent>
 	{
-		const auto ui = RE::UI::GetSingleton();
-		return ui && ui->IsMenuOpen(RE::LoadingMenu::MENU_NAME);
-	}
+		RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override
+		{
+			if (a_event->menuName == RE::LoadingMenu::MENU_NAME) {
+				framesAfterLoad = 10;
+			}
+			return RE::BSEventNotifyControl::kContinue;
+		}
+	};
+
+	LoadingScreenWatcher loadingScreenWatcher;
 
 	struct SkyUpdateWeather
 	{
 		static void thunk(RE::Sky* a_sky)
 		{
-			const auto resync = a_sky && NeedsResync(a_sky);
-			const auto hidden = resync && ScreenIsCovered();
-			const auto borrowFastTravel = hidden && a_sky->flags.none(RE::Sky::Flags::kFastTravel);
-			if (resync && (hidden || !a_sky->lastWeather)) {
-				a_sky->region = nullptr;
-			}
-			if (borrowFastTravel) {
-				a_sky->flags.set(RE::Sky::Flags::kFastTravel);
+			if (framesAfterLoad > 0) {
+				--framesAfterLoad;
+				if (NeedsResync(a_sky)) {
+					a_sky->region = nullptr;
+					a_sky->flags.set(RE::Sky::Flags::kFastTravel);
+				}
 			}
 			func(a_sky);
-			if (borrowFastTravel) {
-				a_sky->flags.reset(RE::Sky::Flags::kFastTravel);
-			}
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
+
+	void OnMessage(SKSE::MessagingInterface::Message* a_message)
+	{
+		if (a_message->type == SKSE::MessagingInterface::kDataLoaded) {
+			RE::UI::GetSingleton()->AddEventSink<RE::MenuOpenCloseEvent>(&loadingScreenWatcher);
+		}
+	}
 }
 
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
 	SKSE::Init(skse);
+	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	const REL::Relocation<std::uintptr_t> update{ RELOCATION_ID(25682, 26229) };
 	const auto target = REL::Relocation<std::uintptr_t>{ RELOCATION_ID(25684, 26231) }.address();
 	std::uintptr_t site = 0;
